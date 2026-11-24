@@ -1068,3 +1068,72 @@ test('weighted strict mode settles many calls after an initial timer drift', asy
 		assertWeightLimit(t, executions, 10, 100);
 	});
 });
+
+test('unweighted strict mode revalidates delayed executions after a stall', async t => {
+	await withFakeTimers(async clock => {
+		const executions = [];
+		const throttled = pThrottle({limit: 1, interval: 100, strict: true})(() => {
+			executions.push({time: clock.now, weight: 1});
+		});
+		const promises = [throttled(), throttled(), throttled()];
+		clock.now = 1300;
+		let runs = 0;
+		while (clock.pendingTimerCount > 0) {
+			clock.runNext();
+			t.true(++runs < 10);
+		}
+
+		await Promise.all(promises);
+		t.deepEqual(executions.map(({time}) => time), [1000, 1300, 1400]);
+		assertWeightLimit(t, executions, 1, 100);
+	});
+});
+
+for (const limit of [1, 2, 3]) {
+	test(`unweighted strict mode keeps capacity ${limit} when timers fire out of order`, async t => {
+		await withFakeTimers(async clock => {
+			const executions = [];
+			const throttled = pThrottle({limit, interval: 100, strict: true})(() => {
+				executions.push({time: clock.now, weight: 1});
+			});
+			const promises = Array.from({length: limit * 4}, () => throttled());
+			clock.runLast(50);
+			let runs = 0;
+			while (clock.pendingTimerCount > 0) {
+				clock.runNext();
+				t.true(++runs < 100);
+			}
+
+			await Promise.all(promises);
+			t.is(executions.length, limit * 4);
+			t.is(throttled.queueSize, 0);
+			assertWeightLimit(t, executions, limit, 100);
+		});
+	});
+}
+
+test('unweighted strict mode aborts calls rescheduled after drift', async t => {
+	await withFakeTimers(async clock => {
+		const controller = new AbortController();
+		const executions = [];
+		const throttled = pThrottle({
+			limit: 1, interval: 100, strict: true, signal: controller.signal,
+		})(() => {
+			executions.push(clock.now);
+		});
+		const first = throttled();
+		const second = throttled();
+		const third = throttled();
+		clock.now = 1300;
+		clock.runNext();
+		clock.runNext();
+		t.is(throttled.queueSize, 1);
+		const reason = new Error('stop');
+		controller.abort(reason);
+		await Promise.all([first, second]);
+		await t.throwsAsync(third, {is: reason});
+		t.is(throttled.queueSize, 0);
+		t.is(clock.pendingTimerCount, 0);
+		t.deepEqual(executions, [1000, 1300]);
+	});
+});

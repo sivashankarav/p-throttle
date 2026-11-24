@@ -54,6 +54,7 @@ export default function pThrottle({limit, interval, strict, signal, onDelay, wei
 	const state = {
 		queue: new Map(),
 		strictTicks: [],
+		strictExecutions: [],
 		// Track windowed algorithm state so it can be reset on abort
 		currentTick: 0,
 		activeWeight: 0,
@@ -211,6 +212,24 @@ export default function pThrottle({limit, interval, strict, signal, onDelay, wei
 				let tickRecord = strict ? delayResult.tickRecord : undefined;
 
 				const execute = () => {
+					if (strict && !weight && interval > 0) {
+						const now = Date.now();
+						while (state.strictExecutions.length > 0 && now - state.strictExecutions[0] >= interval) {
+							state.strictExecutions.shift();
+						}
+
+						// Timer drift can bring separate reservations into the same window.
+						// Count actual executions before allowing another call through.
+						if (state.strictExecutions.length >= strictCapacity) {
+							state.queue.delete(timeoutId);
+							timeoutId = setTimeout(execute, state.strictExecutions[0] + interval - now);
+							state.queue.set(timeoutId, reject);
+							return;
+						}
+
+						state.strictExecutions.push(now);
+					}
+
 					// Revalidate weighted calls at execution time to account for timer drift
 					if (tickRecord) {
 						const actualTime = Date.now();
@@ -288,6 +307,7 @@ export default function pThrottle({limit, interval, strict, signal, onDelay, wei
 
 						functionState.queue.clear();
 						functionState.strictTicks.length = 0;
+						functionState.strictExecutions.length = 0;
 						// Reset windowed state so subsequent calls are not artificially delayed
 						functionState.currentTick = 0;
 						functionState.activeWeight = 0;
